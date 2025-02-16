@@ -8,6 +8,8 @@ import { useDropzone } from "react-dropzone";
 
 const socket = io("http://localhost:5000"); // Connect to signaling server
 
+const CHUNK_SIZE = 64 * 1024; // Start with 64KB
+
 const FileTransferApp: React.FC = () => {
   const [connected, setConnected] = useState(false);
   const [peerId, setPeerId] = useState("");
@@ -20,6 +22,7 @@ const FileTransferApp: React.FC = () => {
   const [progress, setProgress] = useState(0);
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
+  const [transferSpeed, setTransferSpeed] = useState(0);
 
   useEffect(() => {
     socket.on("connect", () => {
@@ -40,6 +43,9 @@ const FileTransferApp: React.FC = () => {
 
       // Handle incoming ICE candidates
       peerConnection.current.onicecandidate = (event) => {
+        if (peerConnection.current?.iceConnectionState === "disconnected") {
+          setStatus("Disconnected. Reconnect required.");
+        }
         if (event.candidate) {
           socket.emit("ice-candidate", { candidate: event.candidate });
         }
@@ -117,9 +123,14 @@ const FileTransferApp: React.FC = () => {
           { name: `received_file_${Date.now()}`, blob: receivedBlob },
         ]);
         receivedChunks = [];
-      } else if (event.data instanceof Blob) {
-        receivedChunks.push(event.data);
+      } else if (event.data instanceof ArrayBuffer) {
+        receivedChunks.push(new Blob([event.data])); // Directly convert to Blob
       }
+    };
+
+    dataChannel.current.onerror = (error) => {
+      console.error("Data channel error:", error);
+      setStatus("Error: Connection lost.");
     };
   };
 
@@ -131,23 +142,50 @@ const FileTransferApp: React.FC = () => {
     if (!dataChannel.current) return;
 
     fileQueue.forEach((file) => {
-      const chunkSize = 16 * 1024; // 16 KB per chunk
       let offset = 0;
 
       const sendChunk = () => {
-        if (offset < file.size) {
-          const slice = file.slice(offset, offset + chunkSize);
-          dataChannel.current?.send(slice);
-          offset += chunkSize;
+        if (!dataChannel.current || offset >= file.size) {
+          dataChannel.current?.send("EOF"); // End-of-file marker
+          return;
+        }
+
+        const startTime = Date.now();
+        let bytesSent = 0;
+
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const reader = new FileReader();
+
+        reader.onload = async (event) => {
+          const buffer = event.target?.result as ArrayBuffer;
+
+          if (dataChannel.current?.bufferedAmount) {
+            // Handle backpressure
+            while (dataChannel.current?.bufferedAmount > 65536) {
+              // Wait if buffer is full
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+          }
+          dataChannel.current?.send(buffer);
+          offset += CHUNK_SIZE;
           setProgress((offset / file.size) * 100);
 
-          setTimeout(sendChunk, 50); // Prevent blocking the channel
-        } else {
-          dataChannel.current?.send("EOF"); // End of file marker
-        }
+          setTimeout(sendChunk, 0); // Continue sending
+        };
+
+        reader.readAsArrayBuffer(slice);
+
+        bytesSent += CHUNK_SIZE;
+        setTransferSpeed(calculateSpeed(bytesSent, startTime));
       };
       sendChunk();
     });
+  };
+
+  const calculateSpeed = (bytesSent: number, startTime: number): number => {
+    const duration = (Date.now() - startTime) / 1000; // Convert to seconds
+    if (duration === 0) return 0; // Prevent division by zero
+    return parseFloat((bytesSent / duration / 1024).toFixed(2)); // Convert bytes to KB/s
   };
 
   const { getRootProps, getInputProps } = useDropzone({ onDrop });
