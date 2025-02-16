@@ -5,6 +5,7 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { useDropzone } from "react-dropzone";
+import axios from "axios";
 
 const socket = io("http://localhost:5000"); // Connect to signaling server
 
@@ -20,9 +21,10 @@ const FileTransferApp: React.FC = () => {
     { name: string; blob: Blob }[]
   >([]);
   const [progress, setProgress] = useState(0);
+  const [transferSpeed, setTransferSpeed] = useState(0);
+  const [fallbackUrl, setFallbackUrl] = useState<string | null>(null);
   const peerConnection = useRef<RTCPeerConnection | null>(null);
   const dataChannel = useRef<RTCDataChannel | null>(null);
-  const [transferSpeed, setTransferSpeed] = useState(0);
 
   useEffect(() => {
     socket.on("connect", () => {
@@ -130,7 +132,8 @@ const FileTransferApp: React.FC = () => {
 
     dataChannel.current.onerror = (error) => {
       console.error("Data channel error:", error);
-      setStatus("Error: Connection lost.");
+      setStatus("WebRTC Failed! Uploading...");
+      fallbackToServer();
     };
   };
 
@@ -186,6 +189,29 @@ const FileTransferApp: React.FC = () => {
     const duration = (Date.now() - startTime) / 1000; // Convert to seconds
     if (duration === 0) return 0; // Prevent division by zero
     return parseFloat((bytesSent / duration / 1024).toFixed(2)); // Convert bytes to KB/s
+  };
+
+  const fallbackToServer = async () => {
+    if (fileQueue.length === 0) return;
+
+    const formData = new FormData();
+    formData.append("file", fileQueue[0]);
+
+    try {
+      const response = await axios.post(
+        "http://localhost:8000/upload",
+        formData,
+        {
+          headers: { "Content-Type": "multipart/form-data" },
+        }
+      );
+
+      setFallbackUrl(response.data.fileUrl);
+      setStatus("File uploaded. Share the download link!");
+    } catch (error) {
+      console.error(error);
+      setStatus("Server Upload Failed.");
+    }
   };
 
   const { getRootProps, getInputProps } = useDropzone({ onDrop });
